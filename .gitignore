@@ -1,0 +1,22 @@
+# macOS
+.DS_Store
+
+# VS Code
+.vscode/
+
+# Node
+node_modules/
+
+# Environment / secrets
+.env
+.env.*
+
+# Build files
+dist/
+build/
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
