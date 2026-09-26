@@ -259,56 +259,47 @@ void main() {
       gl.uniformMatrix4fv(uMVM, false, modelViewMatrix);
 
       // ---------------- Wind ----------------
-      // gentle sway always; a gust leans the tree to the right
+      // The whole tree sways as one piece, rotating about its base.
+      // gentle sway always (+-4 deg); a gust leans the tree to the right
       let g = gustAmount(t);
-      function windAngle(amp, lean) {
-        return (amp * Math.sin(t) - lean * g) * DEG;
-      }
+      let sway = (4 * Math.sin(t) - 8 * g) * DEG;
 
-      // ---------------- Hierarchical tree ----------------
-      // M_child = M_parent * T_joint * R_joint 
-      // Each part rotates about the joint at its base, and carries everything above it.
-      // The cone/cylinder formulas build shapes along +z, so each segment is drawn
-      // with RotateX(-90 deg) to stand it up along +y.
-      let world = mat4RotateX(cubeRotation, 0.2);         
+      let world = mat4RotateX(cubeRotation, 0.2);                 // slight tilt to see 3D
       let m;
 
-      // Trunk (cylinder) +-2 deg
-      let trunk = mat4Translate(world, [0, -1.8, 0]);
-      trunk = mat4RotateZ(trunk, windAngle(2, 1.5));
-      m = mat4RotateX(trunk, -Math.PI / 2);
+      // The cone/cylinder formulas build shapes along +z, so each part is drawn
+      // with RotateX(-90 deg) to stand it up along +y.
+      function placeOnTree(height) {
+        let p = mat4Translate(world, [0, -1.8, 0]);               // base of the tree
+        p = mat4RotateZ(p, sway);                                 // sway about the base
+        return mat4Translate(p, [0, height, 0]);                  // up to this part's height
+      }
+
+      // Trunk (cylinder)
+      m = mat4RotateX(placeOnTree(0), -Math.PI / 2);
       m = mat4Scale(m, [0.15, 0.15, 0.5]);
       drawObject(trunkObj, m);
 
-      // Bottom cone  +-3 deg
-      let bottom = mat4Translate(trunk, [0, 0.5, 0]);
-      bottom = mat4RotateZ(bottom, windAngle(3, 2.5));
-      m = mat4RotateX(bottom, -Math.PI / 2);
+      // Bottom, middle, top cones
+      m = mat4RotateX(placeOnTree(0.5), -Math.PI / 2);
       m = mat4Scale(m, [1.1, 1.1, 1.3]);
       drawObject(coneObj, m);
 
-      // Middle cone  +-5 deg
-      let middle = mat4Translate(bottom, [0, 0.8, 0]);
-      middle = mat4RotateZ(middle, windAngle(5, 3.5));
-      m = mat4RotateX(middle, -Math.PI / 2);
+      m = mat4RotateX(placeOnTree(1.3), -Math.PI / 2);
       m = mat4Scale(m, [0.85, 0.85, 1.1]);
       drawObject(coneObj, m);
 
-      // Top cone  +-7 deg
-      let top = mat4Translate(middle, [0, 0.7, 0]);
-      top = mat4RotateZ(top, windAngle(7, 4.5));
-      m = mat4RotateX(top, -Math.PI / 2);
+      m = mat4RotateX(placeOnTree(2.0), -Math.PI / 2);
       m = mat4Scale(m, [0.6, 0.6, 0.9]);
       drawObject(coneObj, m);
 
-      let star = mat4Translate(top, [0, 1.05, 0]);           // star sits on the top cone
-      star = mat4RotateZ(star, windAngle(10, 6));            // star sways
+      // Star: 5 small cones, 72 deg apart, twinkling (SCALING)
       let twinkle = 0.2 * (1 + 0.2 * Math.sin(t * 3));
       for (let i = 0; i < 5; i++) {
-        m = mat4RotateZ(star, i * 2 * Math.PI / 5);          // turn 0°, 72°, 144°, 216°, 288°
-        m = mat4RotateX(m, -Math.PI / 2);                    // stand the cone up so its tip points out
-        m = mat4Scale(m, [0.3 * twinkle, 0.3 * twinkle, twinkle]);  // skinny + twinkle
-      drawObject(starObj, m);
+        m = mat4RotateZ(placeOnTree(3.05), i * 2 * Math.PI / 5);    // each point 72 deg apart
+        m = mat4RotateX(m, -Math.PI / 2);                            // cone's tip points outward
+        m = mat4Scale(m, [0.3 * twinkle, 0.3 * twinkle, twinkle]);   // skinny point, twinkle size
+        drawObject(starObj, m);
       }
 
       // ---------------- Presents (cubes) ----------------
