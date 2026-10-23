@@ -74,6 +74,22 @@ function createCylinder(r, h, uSteps, vSteps) {
   return { positions: new Float32Array(pos), normals: new Float32Array(nrm), indices: gridIndices(uSteps, vSteps) };
 }
 
+// ---------------- Sphere (for the ornaments) ----------------
+//   x = r * sin(phi) * cos(theta),  y = r * cos(phi),  z = r * sin(phi) * sin(theta)
+// The normal is the point's direction from the center, (x, y, z) / r -> smooth shading.
+function createSphere(r, stacks, slices) {
+  const pos = [], nrm = [];
+  for (let i = 0; i <= stacks; i++) {
+    const phi = i / stacks * Math.PI;                // 0 = top, PI = bottom
+    for (let j = 0; j <= slices; j++) {
+      const theta = j * 2 * Math.PI / slices;
+      const x = Math.sin(phi) * Math.cos(theta), y = Math.cos(phi), z = Math.sin(phi) * Math.sin(theta);
+      pos.push(r * x, r * y, r * z);
+      nrm.push(x, y, z);
+    }
+  }
+  return { positions: new Float32Array(pos), normals: new Float32Array(nrm), indices: gridIndices(slices, stacks) };
+}
 
 // ---------------- Flat-shaded copy of any mesh----------------
 // Every triangle gets its own 3 vertices, and all 3 share the triangle's face

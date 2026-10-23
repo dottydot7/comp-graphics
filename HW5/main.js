@@ -16,7 +16,7 @@ void main() {
 }
 `;
 
-// Phong lighting per fragment with two point lights:
+// Phong lighting per fragment with two point lights (Week 6-2 slides):
 //   I_final = Ka*I_a + sum over lights of  f_att * I_L,i * [Kd*cos(theta) + Ks*cos(phi)^alpha]
 //   Light 1: the template's white point light, fixed in the world
 //   Light 2: a warm point light at the star (it sways with the tree)
@@ -36,9 +36,9 @@ uniform float uKa, uKd, uKs, uAlpha;
 
 out vec4 fragColor;
 
-// Diffuse + specular from one light 
+// Diffuse + specular from one light ("Computing Diffuse and Specular" slide)
 vec3 calculateLight(vec3 lightPos, vec3 lightColor, vec3 normal, vec3 viewDir) {
-  // Attenuation: f_att = 1 / (a + b*d + c*d^2)
+  // Attenuation: f_att = 1 / (a + b*d + c*d^2), slide's practical default a=1, b=0.09, c=0.032
   float d = length(lightPos - vPosition);
   float fatt = 1.0 / (1.0 + 0.09 * d + 0.032 * d * d);
 
@@ -145,6 +145,7 @@ function createMesh({ positions, normals, indices }) {
 // (no uneven scaling) and mat3(uModelView) keeps the normals correct, as in the template.
 // FLAT shading:   tree cones and star points (one normal per triangle -> visible facets)
 // SMOOTH shading: trunk (normals vary around the cylinder)
+const ornamentMesh   = createMesh(createSphere(0.08, 12, 16));
 const bottomConeMesh = createMesh(toFlat(createCone(1.1, 1.3, 16, 6)));
 const middleConeMesh = createMesh(toFlat(createCone(0.85, 1.1, 16, 6)));
 const topConeMesh    = createMesh(toFlat(createCone(0.6, 0.9, 16, 6)));
@@ -228,7 +229,8 @@ function gustAmount(t) {
 // alpha: 5-10 = plastic-like, 100-200 = metal-like (slides)
 // DIFFUSE only (ks = 0): trunk, presents
 // SPECULAR (shiny highlights): tree (set by the "Tree specular" slider)
-const trunkMat    = { color: [0.55, 0.3, 0.1], ka: 0.2, kd: 0.9, ks: 0, alpha: 1 };
+const ornamentMat = { color: [0.9, 0.05, 0.05], ka: 0.2, kd: 0.7, ks: 1.0, alpha: 100 }; // shiny red
+const trunkMat   = { color: [0.55, 0.3, 0.1], ka: 0.2, kd: 0.9, ks: 0, alpha: 1 };
 const treeMat     = { color: [0.1, 0.65, 0.25], ka: 0.2, kd: 0.8, ks: 0.5, alpha: 10 };   // plastic-like
 const starMat     = { color: [1, 0.85, 0], ka: 0.2, kd: 0.6, ks: 0.8, alpha: 100 };       // metal-like
 const presentMat1 = { color: [0.6, 0.2, 0.8], ka: 0.2, kd: 0.8, ks: 0, alpha: 1 };
@@ -244,7 +246,7 @@ function createNode(mesh, material, shape) {
 // drawn with RotateX(-90 deg) to stand it up along +y.
 const standUp = rotateX(-Math.PI / 2);
 
-// Hierarchy (6 levels, same tree as HW4):
+// Hierarchy (6 levels):
 const trunk        = createNode(trunkMesh, trunkMat, standUp);
 const bottomCone   = createNode(bottomConeMesh, treeMat, standUp);
 const middleCone   = createNode(middleConeMesh, treeMat, standUp);
@@ -266,6 +268,21 @@ for (let i = 0; i < 5; i++) {
   star.children.push(point);
   starPoints.push(point);
 }
+
+// Ornaments: red spheres placed around a cone layer, so they sway with it.
+// A cone of radius R and height H has radius R * (1 - y / H) at height y.
+function addOrnaments(cone, R, H, y, count) {
+  const ring = R * (1 - y / H) + 0.03;
+  for (let i = 0; i < count; i++) {
+    const a = i * 2 * Math.PI / count;
+    const ornament = createNode(ornamentMesh, ornamentMat, translate(0, 0, 0));
+    ornament.joint = translate(ring * Math.cos(a), y, ring * Math.sin(a));
+    cone.children.push(ornament);
+  }
+}
+addOrnaments(bottomCone, 1.1, 1.3, 0.2, 6);
+addOrnaments(middleCone, 0.85, 1.1, 0.2, 5);
+addOrnaments(topCone, 0.6, 0.9, 0.15, 4);
 
 // Draw one node with its material (template's drawNode + material uniforms)
 function drawNode(node, frame) {
@@ -347,7 +364,7 @@ function render(time) {
   gl.uniform3fv(u.uLightPos2, transformPoint(starFrame, [0, 0, 1.5]));  // 1.5 units in front of the star so it hits the front of the tree
   gl.uniform3fv(u.uLightColor1, mainColor);
   gl.uniform3fv(u.uLightColor2, starColor);
-
+ 
   updateMaterials();
   drawTree(trunk, view);
   requestAnimationFrame(render);
