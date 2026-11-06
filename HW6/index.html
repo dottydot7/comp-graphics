@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8">
+  <title>Texture Mapping</title>
+  <style>
+    body { background: #111; color: #ccc; font-family: monospace; }
+    canvas { border: 1px solid #444; }
+    .layout { display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; }
+    .editors { display: flex; flex-direction: column; gap: 10px; }
+    textarea {
+      background: #222;
+      color: #0f0;
+      font: 14px monospace;
+      width: 400px;
+      height: 200px;
+      box-sizing: border-box;
+      white-space: pre;
+    }
+    #shaderError { color: #f66; white-space: pre-wrap; width: 400px; margin: 0; }
+    .controls { margin-top: 10px; display: flex; flex-direction: column; gap: 5px; }
+    .control-row { display: flex; align-items: center; gap: 10px; }
+    .panels { display: flex; flex-direction: column; gap: 8px; }
+    fieldset { border: 1px solid #444; padding: 6px 10px; }
+    legend { color: #fc6; }
+    .row { display: grid; grid-template-columns: 150px 140px 40px; align-items: center; gap: 6px; min-height: 24px; }
+  </style>
+</head>
+
+<body>
+  <h2>HW 6 Texture Mapping: Fireplace</h2>
+  <p>Edit the shaders on the left; the canvas updates as you type.<br>
+    Drag to rotate, scroll (or w, s) to zoom, arrow keys to move the camera.<br>
+    Bricks (boxes): <b>bump mapping</b> &middot; Floor, mantel (boxes) and logs (cylinders): <b>normal mapping</b><br>
+    Fire: <b>video texture</b> &middot; Wreath (torus), mini trees (cones), ornaments (spheres): image textures</p>
+
+  <div class="layout">
+    <div class="editors">
+      <div>
+        <b>Vertex Shader</b><br>
+        <textarea id="vertEditor" spellcheck="false"></textarea>
+      </div>
+      <div>
+        <b>Fragment Shader</b><br>
+        <textarea id="fragEditor" spellcheck="false"></textarea>
+      </div>
+      <pre id="shaderError"></pre>
+    </div>
+
+    <div>
+      <canvas id="glcanvas" width="640" height="480"></canvas>
+
+      <div class="controls">
+        <div class="control-row">
+          <label for="slider">Rotation Angle:</label>
+          <input type="range" id="slider" min="0" max="360" value="0">
+          <span id="sliderValue">0</span>
+        </div>
+        <div class="control-row">
+          <select id="axisSelect">
+            <option value="y">Y Rotation</option>
+            <option value="x">X Rotation</option>
+            <option value="z">Z Rotation</option>
+          </select>
+          <button id="spinButton">Start/Stop Rotation</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="panels">
+      <fieldset>
+        <legend>Bump &amp; Normal Mapping</legend>
+        <div class="row"><label>Bump strength</label><input type="range" id="bumpStrength" min="0" max="8" step="0.5" value="4"><span id="bumpStrengthVal"></span></div>
+        <div class="row"><label>Normal map strength</label><input type="range" id="normalStrength" min="0" max="3" step="0.1" value="1"><span id="normalStrengthVal"></span></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Lights</legend>
+        <div class="row"><label>Room light position</label><input type="range" id="lightX" min="-5" max="5" step="0.1" value="2.5"><span id="lightXVal"></span></div>
+        <div class="row"><label>Room light</label><input type="range" id="roomLight" min="0" max="4" step="0.1" value="1.8"><span id="roomLightVal"></span></div>
+        <div class="row"><label>Fire light</label><input type="range" id="fireLight" min="0" max="3" step="0.1" value="1.5"><span id="fireLightVal"></span></div>
+        <div class="row"><label>Fire video</label><button id="fireBtn">Play / Pause</button></div>
+      </fieldset>
+    </div>
+  </div>
+
+  <script src="transforms.js"></script>
+  <script src="models.js"></script>
+  <script src="main.js"></script>
+</body>
+
+</html>
