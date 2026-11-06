@@ -20,3 +20,14 @@ A 5-level hierarchical Christmas tree (trunk -> three cones -> star) where each 
 4. **Interactive controls:**
    - **Movement:** The *Gust of wind!* button and the *Wind strength* slider lean the trunk, all three cones and the star, and slide the presents.
    - **Lighting/materials:** The *Star light* slider changes the star light's brightness, and the *Tree specular* slider changes the tree's specular reflection.
+
+# HW6 – Texture Mapping: Fireplace
+
+A fireplace scene that shows texture mapping, bump mapping, normal mapping, and an animated video texture.
+The brick fireplace is **bump mapped** with a height map, and the wood floor, mantel, and logs are **normal mapped**.
+The fire is a looping **video texture**, and a pine-textured wreath (torus), mini trees (cones), and patterned ornaments (spheres) decorate the mantel.
+Lighting is per-fragment Phong with two point lights: a movable room light and an orange light at the fire.
+
+**Live demo:** https://dottydot7.github.io/comp-graphics/HW6/
+
+**Controls:** drag to rotate, scroll or `w`/`s` to zoom, arrow keys to move the camera. Use the sliders to change bump and normal-map strength and the lights.
