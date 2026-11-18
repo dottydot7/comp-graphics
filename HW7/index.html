@@ -1,0 +1,893 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8">
+  <title>Ray Tracing</title>
+  <style>
+    body { background: #111; color: #ccc; font-family: monospace; }
+    canvas { border: 1px solid #444; touch-action: none; }
+    .layout { display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; }
+    .editors { display: flex; flex-direction: column; gap: 10px; }
+    textarea {
+      background: #222;
+      color: #0f0;
+      font: 14px monospace;
+      width: 400px;
+      height: 200px;
+      box-sizing: border-box;
+      white-space: pre;
+    }
+    #shaderError { color: #f66; white-space: pre-wrap; width: 400px; margin: 0; }
+    .controls { margin-top: 10px; display: flex; flex-direction: column; gap: 5px; }
+    .control-row { display: grid; grid-template-columns: 150px 160px 40px; align-items: center; gap: 10px; }
+  </style>
+</head>
+
+<body>
+  <h2>HW 7 Ray Tracing: Christmas Tree and Snow Globe by the Fireplace</h2>
+
+  <p>Edit the shaders on the left; the canvas updates as you type.<br>
+    Everything is ray traced: the fireplace, the Christmas tree (textured tree, bark trunk, ornaments),
+    three wrapped gifts and a red gift tag, and a glass snow globe with a snowman.<br>
+    Three lights (fire, room, star) with ray-traced shadows; the globe refracts, the floor and ornaments reflect.</p>
+
+  <h3>Ray tracing concepts in this scene: </h3>
+  <ul>
+    Each pixel shoots a ray into the scene. The ray is tested against spheres, planes, triangles, boxes, cylinders, 
+    and cones to find what it hits. When it hits a shiny surface it bounces, and when it hits the glass it bends (refracts) 
+    or reflects, using Snell’s law and Fresnel to choose which. Shadow rays check whether a light is blocked, and a tiny offset 
+    keeps each new ray from hitting the surface it just left. A loop handles the bounces, since GLSL can’t recurse.
+  </ul>
+
+  <div class="layout">
+    <div class="editors">
+      <div>
+        <b>Vertex Shader</b><br>
+        <textarea id="vertEditor" spellcheck="false"></textarea>
+      </div>
+      <div>
+        <b>Fragment Shader</b><br>
+        <textarea id="fragEditor" spellcheck="false"></textarea>
+      </div>
+      <pre id="shaderError"></pre>
+    </div>
+
+    <div>
+      <canvas id="glcanvas" width="640" height="400"></canvas>
+
+      <div class="controls">
+        <div class="control-row">
+          <label for="bounces">Max Bounces:</label>
+          <input type="range" id="bounces" min="1" max="8" value="5">
+          <span id="bouncesValue">5</span>
+        </div>
+        <div class="control-row">
+          <label for="ambient">Ambient Strength:</label>
+          <input type="range" id="ambient" min="0" max="0.5" step="0.01" value="0.12">
+          <span id="ambientValue">0.12</span>
+        </div>
+        <div class="control-row">
+          <label for="fire">Fire Light:</label>
+          <input type="range" id="fire" min="0" max="5" step="0.1" value="2">
+          <span id="fireValue">2</span>
+        </div>
+        <div class="control-row">
+          <label for="room">Room Light:</label>
+          <input type="range" id="room" min="0" max="5" step="0.1" value="2">
+          <span id="roomValue">2</span>
+        </div>
+        <div class="control-row">
+          <label for="star">Star Light:</label>
+          <input type="range" id="star" min="0" max="5" step="0.1" value="1.5">
+          <span id="starValue">1.5</span>
+        </div>
+        <div class="control-row">
+          <label for="snow">Snow Speed:</label>
+          <input type="range" id="snow" min="0" max="3" step="0.1" value="1">
+          <span id="snowValue">1</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script id="vertex-shader" type="x-shader/x-vertex">#version 300 es
+in vec2 position;
+void main() {
+    gl_Position = vec4(position, 0.0, 1.0);
+}
+</script>
+
+<script id="fragment-shader" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+
+uniform float u_time;
+uniform vec2 u_resolution;
+uniform int u_maxBounces;
+uniform float u_ambientStrength;
+uniform vec2 u_cameraOrbit;
+uniform float u_cameraDist;
+uniform float u_fireIntensity, u_roomIntensity, u_starIntensity;
+uniform float u_snowTime;     // drives the falling snow
+
+// Textures: 
+uniform sampler2D u_brick, u_brickHeight, u_wood, u_woodNormal, u_bark, u_barkNormal,
+                  u_pine, u_ornRed, u_ornBlue, u_giftBlue, u_giftPurple, u_giftRed, u_fire;
+
+out vec4 fragColor;
+
+const float PI = 3.14159265;
+// Shadow bias: new rays start a little off the surface, along the normal (or along the
+// direction they travel for refraction), so they don't re-hit the surface they just left.
+const float EPS = 0.01;
+const float GLASS_IOR = 1.7;     // refractive index of the snow globe glass (fixed)
+
+// ===================== Scene layout =====================
+// fireplace: floor at y = 0, front of the fireplace at z = 0, wall at z = -0.6
+const float WALL_Z = -0.6;
+// HW5 Christmas tree: to the right of the fireplace
+const vec3 TREE = vec3(2.6, 0.0, 0.6);           // base of the trunk
+const vec3 STAR_C = TREE + vec3(0.0, 3.45, 0.0);
+// Snow globe: to the left of the fireplace
+const vec3 GLOBE_C = vec3(-2.6, 0.92, 0.5);
+const float GLOBE_R = 0.7;
+const float SNOW_Y = 0.5;                         // snow ground inside the globe
+
+// Lights
+const vec3 FIRE_LIGHT = vec3(0.0, 0.55, -0.12);   // in the fireplace 
+const vec3 ROOM_LIGHT = vec3(-0.5, 3.4, 3.2);     // a lamp in front of the scene
+const vec3 STAR_LIGHT = STAR_C + vec3(0.0, 0.0, 1.5);  // in front of the star
+
+// Materials
+const int BRICK = 0, SOOT = 1, FLOOR = 2, WALL = 3, MANTEL = 4, LOG = 5, PINE = 6, ORN_RED = 7,
+          ORN_BLUE = 8, TREE_GREEN = 9, TRUNK = 10, STAR = 11, RED_BALL = 12, PRESENT1 = 13,
+          PRESENT2 = 14, GLASS = 15, GLOBE_BASE = 16, SNOW = 17, SNOWMAN = 18, COAL = 19,
+          CARROT = 20, FLAKE = 21, PRESENT3 = 22, TAG = 23;
+
+struct Ray { vec3 origin; vec3 direction; };
+
+// T and B = the directions the texture's u and v run on the surface (for bump / normal mapping)
+struct HitData {
+    bool hit;
+    float t;
+    vec3 point;
+    vec3 normal;
+    vec3 T;
+    vec3 B;
+    vec2 uv;
+    int mat;
+};
+
+struct Surface {
+    vec3 color;
+    vec3 normal;
+    float reflectivity;
+    float specular;
+    float shininess;
+    float glow;           // light it gives off by itself (star, snowflakes)
+    bool glass;
+};
+
+float hash(float n) { return fract(sin(n) * 43758.5453); }
+vec3 toLinear(vec3 c) { return pow(c, vec3(2.2)); }   // images and colors are gamma-encoded
+
+// ===================== Intersections =====================
+bool intersectSphere(Ray ray, vec3 c, float r, out float t) {
+    vec3 oc = ray.origin - c;
+    float b = dot(oc, ray.direction);
+    // d = r^2 - (distance from the center to the ray)^2. Written this way instead of
+    // b*b - dot(oc,oc) + r*r, which loses small spheres to float rounding when the camera is far away.
+    vec3 perp = oc - b * ray.direction;
+    float d = r * r - dot(perp, perp);
+    if (d < 0.0) return false;
+    t = -b - sqrt(d);
+    if (t < 0.001) t = -b + sqrt(d);       // ray starts inside (glass)
+    return t > 0.001;
+}
+
+// Slab test (starter's cube, with a different half size per axis)
+bool intersectBox(Ray ray, vec3 c, vec3 h, out float t, out vec3 normal) {
+    vec3 t0s = (c - h - ray.origin) / ray.direction;
+    vec3 t1s = (c + h - ray.origin) / ray.direction;
+    vec3 tmin = min(t0s, t1s), tmax = max(t0s, t1s);
+    float t0 = max(max(tmin.x, tmin.y), tmin.z);
+    float t1 = min(min(tmax.x, tmax.y), tmax.z);
+    if (t1 < 0.0 || t0 > t1) return false;
+    t = t0 > 0.001 ? t0 : t1;
+    if (t < 0.001) return false;
+    vec3 local = (ray.origin + ray.direction * t - c) / h;
+    vec3 a = abs(local);
+    if (a.x > a.y && a.x > a.z) normal = vec3(sign(local.x), 0.0, 0.0);
+    else if (a.y > a.z) normal = vec3(0.0, sign(local.y), 0.0);
+    else normal = vec3(0.0, 0.0, sign(local.z));
+    return true;
+}
+
+// Plane: points x with x.n = c. t = (c - o.n) / (d.n); parallel rays miss.
+bool intersectPlane(Ray ray, vec3 p0, vec3 n, out float t) {
+    float denom = dot(ray.direction, n);
+    if (abs(denom) < 1e-6) return false;
+    t = dot(p0 - ray.origin, n) / denom;
+    return t > 0.001;
+}
+
+// Triangle: hit the triangle's plane, then barycentric coordinates alpha, beta, gamma.
+// The point is inside when all three are > 0.
+bool intersectTriangle(Ray ray, vec3 a, vec3 b, vec3 c, out float t, out vec3 n, out vec2 bary) {
+    vec3 N = cross(b - a, c - a);
+    float denom = dot(ray.direction, N);
+    if (abs(denom) < 1e-8) return false;
+    t = dot(a - ray.origin, N) / denom;
+    if (t < 0.001) return false;
+    vec3 p = ray.origin + ray.direction * t;
+    float nn = dot(N, N);
+    float alpha = dot(cross(c - b, p - b), N) / nn;
+    float beta  = dot(cross(a - c, p - c), N) / nn;
+    float gamma = 1.0 - alpha - beta;
+    if (alpha < 0.0 || beta < 0.0 || gamma < 0.0) return false;
+    n = normalize(N);
+    if (dot(n, ray.direction) > 0.0) n = -n;
+    bary = vec2(alpha, beta);
+    return true;
+}
+
+// Cylinder standing along y: center c, radius r, half height hh (with flat caps)
+bool intersectCylinder(Ray ray, vec3 c, float r, float hh, out float t, out vec3 normal) {
+    vec3 o = ray.origin - c, d = ray.direction;
+    t = 1e10;
+    bool found = false;
+    float a = d.x * d.x + d.z * d.z;
+    if (a > 1e-8) {                                            // side: x^2 + z^2 = r^2
+        float b = o.x * d.x + o.z * d.z;
+        float disc = b * b - a * (o.x * o.x + o.z * o.z - r * r);
+        if (disc >= 0.0) {
+            float sq = sqrt(disc);
+            float t1 = (-b - sq) / a, t2 = (-b + sq) / a;
+            if (t1 > 0.001 && abs(o.y + t1 * d.y) <= hh) { t = t1; found = true; }
+            else if (t2 > 0.001 && abs(o.y + t2 * d.y) <= hh) { t = t2; found = true; }
+            if (found) { vec3 q = o + t * d; normal = vec3(q.x, 0.0, q.z) / r; }
+        }
+    }
+    if (abs(d.y) > 1e-8) {                                     // caps: y = +-hh
+        for (int i = 0; i < 2; i++) {
+            float y = i == 0 ? hh : -hh;
+            float tc = (y - o.y) / d.y;
+            vec3 q = o + tc * d;
+            if (tc > 0.001 && tc < t && q.x * q.x + q.z * q.z <= r * r) {
+                t = tc; found = true; normal = vec3(0.0, sign(y), 0.0);
+            }
+        }
+    }
+    return found;
+}
+
+// Cone with its tip at "tip", opening downward (height h, base radius r).
+// On the side: x^2 + z^2 = (k s)^2, s = distance below the tip, k = r / h
+bool intersectCone(Ray ray, vec3 tip, float h, float r, out float t, out vec3 normal) {
+    float k = r / h;
+    vec3 o = ray.origin - tip, d = ray.direction;
+    float a = d.x * d.x + d.z * d.z - k * k * d.y * d.y;
+    float b = 2.0 * (o.x * d.x + o.z * d.z - k * k * o.y * d.y);
+    float c = o.x * o.x + o.z * o.z - k * k * o.y * o.y;
+    t = 1e10;
+    bool found = false;
+    float disc = b * b - 4.0 * a * c;
+    if (disc >= 0.0 && abs(a) > 1e-6) {
+        float sq = sqrt(disc);
+        float ta = (-b - sq) / (2.0 * a), tb = (-b + sq) / (2.0 * a);
+        float t1 = min(ta, tb), t2 = max(ta, tb);
+        float s1 = -(o.y + t1 * d.y), s2 = -(o.y + t2 * d.y);
+        if (t1 > 0.001 && s1 >= 0.0 && s1 <= h) { t = t1; found = true; }
+        else if (t2 > 0.001 && s2 >= 0.0 && s2 <= h) { t = t2; found = true; }
+    }
+    if (abs(d.y) > 1e-6) {                                     // flat bottom
+        float tc = (-h - o.y) / d.y;
+        vec3 q = o + tc * d;
+        if (tc > 0.001 && tc < t && dot(q.xz, q.xz) <= r * r) {
+            t = tc; normal = vec3(0.0, -1.0, 0.0); return true;
+        }
+    }
+    if (!found) return false;
+    vec3 q = o + t * d;
+    normal = normalize(vec3(q.x, k * length(q.xz), q.z));
+    return true;
+}
+
+// Does the ray come near a group of objects? (skip the whole group if not: faster)
+bool nearGroup(Ray ray, vec3 c, float r, float maxT) {
+    vec3 oc = ray.origin - c;
+    if (dot(oc, oc) < r * r) return true;
+    float b = dot(oc, ray.direction);
+    float d = b * b - dot(oc, oc) + r * r;
+    return d >= 0.0 && -b + sqrt(d) > 0.0 && -b - sqrt(d) < maxT;
+}
+
+// ===================== Recording hits (keep the closest one) =====================
+vec3 aroundY(vec3 n) {                     // tangent going around a y axis
+    vec3 t = vec3(n.z, 0.0, -n.x);
+    return dot(t, t) > 1e-6 ? normalize(t) : vec3(1.0, 0.0, 0.0);
+}
+void record(inout HitData hit, Ray ray, float t, vec3 n, vec3 T, vec2 uv, int mat) {
+    hit = HitData(true, t, ray.origin + ray.direction * t, n, T, cross(n, T), uv, mat);
+}
+
+void testSphere(Ray ray, vec3 c, float r, int mat, inout HitData hit) {
+    float t;
+    if (intersectSphere(ray, c, r, t) && t < hit.t) {
+        vec3 n = (ray.origin + ray.direction * t - c) / r;
+        vec2 uv = vec2(atan(n.z, n.x) / (2.0 * PI) + 0.5, 1.0 - acos(clamp(n.y, -1.0, 1.0)) / PI);
+        record(hit, ray, t, n, aroundY(n), uv, mat);
+    }
+}
+
+void testBox(Ray ray, vec3 c, vec3 h, int mat, inout HitData hit) {
+    float t; vec3 n;
+    if (intersectBox(ray, c, h, t, n) && t < hit.t) {
+        // Same tangents as HW6's createBox: front +x, back -x, right -z, left +z, top/bottom +x
+        vec3 T = abs(n.y) > 0.5 ? vec3(1.0, 0.0, 0.0) : (abs(n.x) > 0.5 ? vec3(0.0, 0.0, -n.x) : vec3(n.z, 0.0, 0.0));
+        vec3 p = ray.origin + ray.direction * t;
+        record(hit, ray, t, n, T, vec2(dot(p, T), dot(p, cross(n, T))), mat);   // uv in world units
+    }
+}
+
+void testPlane(Ray ray, vec3 p0, vec3 n, vec3 T, int mat, inout HitData hit) {
+    float t;
+    if (intersectPlane(ray, p0, n, t) && t < hit.t) {
+        vec3 p = ray.origin + ray.direction * t;
+        record(hit, ray, t, n, T, vec2(dot(p - p0, T), dot(p - p0, cross(n, T))), mat);
+    }
+}
+
+void testTriangle(Ray ray, vec3 a, vec3 b, vec3 c, int mat, inout HitData hit) {
+    float t; vec3 n; vec2 bary;
+    if (intersectTriangle(ray, a, b, c, t, n, bary) && t < hit.t)
+        record(hit, ray, t, n, normalize(b - a), bary, mat);
+}
+
+// Gift box: the wrap picture covers each face once (uv 0..1 across every face)
+void testGift(Ray ray, vec3 c, vec3 h, int mat, inout HitData hit) {
+    float t; vec3 n;
+    if (intersectBox(ray, c, h, t, n) && t < hit.t) {
+        vec3 T = abs(n.y) > 0.5 ? vec3(1.0, 0.0, 0.0) : (abs(n.x) > 0.5 ? vec3(0.0, 0.0, -n.x) : vec3(n.z, 0.0, 0.0));
+        vec3 B = cross(n, T);
+        vec3 p = ray.origin + ray.direction * t - c;
+        vec2 uv = vec2(dot(p, T) / (2.0 * dot(abs(T), h)) + 0.5, dot(p, B) / (2.0 * dot(abs(B), h)) + 0.5);
+        record(hit, ray, t, n, T, uv, mat);
+    }
+}
+
+void testCylinder(Ray ray, vec3 c, float r, float hh, int mat, inout HitData hit) {
+    float t; vec3 n;
+    if (intersectCylinder(ray, c, r, hh, t, n) && t < hit.t) {
+        vec3 q = ray.origin + ray.direction * t - c;
+        vec2 uv = vec2(atan(q.x, q.z) / (2.0 * PI) + 0.5, (q.y + hh) / (2.0 * hh));
+        record(hit, ray, t, n, abs(n.y) > 0.5 ? vec3(1.0, 0.0, 0.0) : aroundY(n), uv, mat);
+    }
+}
+
+// A log lying along x: swap x and y, use the standing cylinder, swap back
+void testLog(Ray ray, vec3 c, float r, float hh, inout HitData hit) {
+    HitData local = hit;
+    testCylinder(Ray(ray.origin.yxz, ray.direction.yxz), c.yxz, r, hh, LOG, local);
+    if (local.t < hit.t)
+        hit = HitData(true, local.t, ray.origin + ray.direction * local.t, local.normal.yxz,
+                      local.T.yxz, local.B.yxz, local.uv * 2.0, LOG);
+}
+
+void testCone(Ray ray, vec3 tip, float h, float r, float uRepeat, int mat, inout HitData hit) {
+    float t; vec3 n;
+    if (intersectCone(ray, tip, h, r, t, n) && t < hit.t) {
+        vec3 q = ray.origin + ray.direction * t - tip;
+        vec2 uv = vec2(uRepeat * (atan(q.x, q.z) / (2.0 * PI) + 0.5), 1.0 + q.y / h);
+        record(hit, ray, t, n, aroundY(n), uv, mat);
+    }
+}
+
+// ===================== The scene =====================
+// shadow = true for shadow rays: glass doesn't block light (and the falling snowflakes are skipped)
+HitData traceScene(Ray ray, bool shadow) {
+    HitData hit;
+    hit.hit = false;
+    hit.t = 1e10;
+    float t;
+
+    // ---------- Inside the snow globe: only the things in it (and the glass, to get out) ----------
+    vec3 og = ray.origin - GLOBE_C;
+    if (dot(og, og) < GLOBE_R * GLOBE_R) {
+        if (!shadow) testSphere(ray, GLOBE_C, GLOBE_R, GLASS, hit);
+        if (abs(ray.direction.y) > 1e-6) {                               // snow ground (a disk)
+            t = (SNOW_Y - ray.origin.y) / ray.direction.y;
+            vec3 p = ray.origin + ray.direction * t;
+            if (t > 0.001 && t < hit.t && length(p - GLOBE_C) < GLOBE_R)
+                record(hit, ray, t, vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), p.xz, SNOW);
+        }
+        // Snowman: 3 snowballs, coal eyes, carrot nose
+        vec3 s = vec3(GLOBE_C.x, SNOW_Y, GLOBE_C.z);
+        testSphere(ray, s + vec3(0.0, 0.14, 0.0), 0.17, SNOWMAN, hit);
+        testSphere(ray, s + vec3(0.0, 0.38, 0.0), 0.12, SNOWMAN, hit);
+        testSphere(ray, s + vec3(0.0, 0.55, 0.0), 0.085, SNOWMAN, hit);
+        testSphere(ray, s + vec3(-0.03, 0.57, 0.075), 0.014, COAL, hit);
+        testSphere(ray, s + vec3(0.03, 0.57, 0.075), 0.014, COAL, hit);
+        testSphere(ray, s + vec3(0.0, 0.545, 0.09), 0.02, CARROT, hit);
+        testSphere(ray, s + vec3(0.0, 0.40, 0.118), 0.015, COAL, hit);  // buttons
+        testSphere(ray, s + vec3(0.0, 0.33, 0.112), 0.015, COAL, hit);
+        // Falling snowflakes
+        if (!shadow) {
+            for (int i = 0; i < 14; i++) {
+                float fi = float(i);
+                float ang = hash(fi + 1.0) * 2.0 * PI, rad = 0.45 * sqrt(hash(fi + 7.0));
+                float fall = fract(hash(fi + 13.0) - u_snowTime * (0.06 + 0.06 * hash(fi + 3.0)));
+                vec3 fp = vec3(GLOBE_C.x + rad * cos(ang), SNOW_Y + fall * 0.85, GLOBE_C.z + rad * sin(ang));
+                testSphere(ray, fp, 0.022, FLAKE, hit);
+            }
+        }
+        return hit;
+    }
+
+    // ---------- Room (planes) ----------
+    testPlane(ray, vec3(0.0), vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), FLOOR, hit);                  // wood floor
+    testPlane(ray, vec3(0.0, 0.0, WALL_Z), vec3(0.0, 0.0, 1.0), vec3(1.0, 0.0, 0.0), WALL, hit);      // wall
+
+    // ---------- fireplace ----------
+    if (nearGroup(ray, vec3(0.0, 1.6, -0.2), 2.6, hit.t)) {
+        testBox(ray, vec3(-1.05, 0.8, -0.3), vec3(0.25, 0.8, 0.3), BRICK, hit);     // left pillar
+        testBox(ray, vec3(1.05, 0.8, -0.3), vec3(0.25, 0.8, 0.3), BRICK, hit);      // right pillar
+        testBox(ray, vec3(0.0, 1.875, -0.3), vec3(1.3, 0.275, 0.3), BRICK, hit);    // top
+        testBox(ray, vec3(0.0, 0.8, -0.55), vec3(0.8, 0.8, 0.05), SOOT, hit);       // back of the firebox
+        testBox(ray, vec3(0.0, 0.06, 0.25), vec3(1.6, 0.06, 0.4), BRICK, hit);      // hearth
+        testBox(ray, vec3(0.0, 2.21, -0.25), vec3(1.5, 0.06, 0.4), MANTEL, hit);    // mantel
+        testLog(ray, vec3(0.0, 0.21, -0.27), 0.09, 0.6, hit);                        // logs
+        testLog(ray, vec3(0.0, 0.21, -0.07), 0.09, 0.6, hit);
+        testLog(ray, vec3(0.0, 0.36, -0.17), 0.08, 0.5, hit);
+        // On the mantel: two mini trees and three ornaments
+        testCone(ray, vec3(-1.15, 2.97, -0.3), 0.7, 0.24, 2.0, PINE, hit);
+        testCone(ray, vec3(1.15, 2.97, -0.3), 0.7, 0.24, 2.0, PINE, hit);
+        testSphere(ray, vec3(-0.45, 2.38, -0.1), 0.11, ORN_RED, hit);
+        testSphere(ray, vec3(0.0, 2.38, -0.1), 0.11, ORN_BLUE, hit);
+        testSphere(ray, vec3(0.45, 2.38, -0.1), 0.11, ORN_RED, hit);
+    }
+    // Wreath (torus, built here from a ring of pine spheres)
+    if (nearGroup(ray, vec3(0.0, 3.05, -0.48), 0.6, hit.t)) {
+        for (int i = 0; i < 16; i++) {
+            float a = float(i) * 2.0 * PI / 16.0;
+            testSphere(ray, vec3(0.42 * cos(a), 3.05 + 0.42 * sin(a), -0.48), 0.11, PINE, hit);
+        }
+    }
+
+    // ----------Christmas tree ----------
+    if (nearGroup(ray, TREE + vec3(0.0, 1.8, 0.0), 2.0, hit.t)) {
+        testCylinder(ray, TREE + vec3(0.0, 0.45, 0.0), 0.15, 0.45, TRUNK, hit);
+        testCone(ray, TREE + vec3(0.0, 2.2, 0.0), 1.3, 1.1, 1.0, TREE_GREEN, hit);    // bottom
+        testCone(ray, TREE + vec3(0.0, 2.8, 0.0), 1.1, 0.85, 1.0, TREE_GREEN, hit);   // middle
+        testCone(ray, TREE + vec3(0.0, 3.3, 0.0), 0.9, 0.6, 1.0, TREE_GREEN, hit);    // top
+
+        // Red ornaments around each layer (addOrnaments: radius R(1 - y/H) + 0.03)
+        for (int layer = 0; layer < 3; layer++) {
+            float R = layer == 0 ? 1.1 : (layer == 1 ? 0.85 : 0.6);
+            float H = layer == 0 ? 1.3 : (layer == 1 ? 1.1 : 0.9);
+            float y = layer == 2 ? 0.15 : 0.2;
+            float base = layer == 0 ? 0.9 : (layer == 1 ? 1.7 : 2.4);
+            int count = 6 - layer;
+            float ring = R * (1.0 - y / H) + 0.03;
+            for (int i = 0; i < 6; i++) {
+                if (i >= count) break;
+                float a = float(i) * 2.0 * PI / float(count);
+                testSphere(ray, TREE + vec3(ring * cos(a), base + y, ring * sin(a)), 0.08, RED_BALL, hit);
+            }
+        }
+
+        // Star: 5 skinny cones turned 0, 72, 144, 216, 288 degrees (HW5).
+        // Turn the ray instead of the cone, then use the standing cone.
+        // (Shadow rays test the star too, so it casts a shadow on the tree.)
+        {
+            for (int i = 0; i < 5; i++) {
+                float a = float(i) * 2.0 * PI / 5.0, ca = cos(a), sa = sin(a);
+                vec3 o = ray.origin - STAR_C, d = ray.direction;
+                Ray local = Ray(vec3(ca * o.x + sa * o.y, -sa * o.x + ca * o.y, o.z),
+                                vec3(ca * d.x + sa * d.y, -sa * d.x + ca * d.y, d.z));
+                float ts; vec3 n;
+                if (intersectCone(local, vec3(0.0, 0.25, 0.0), 0.25, 0.07, ts, n) && ts < hit.t) {
+                    vec3 nw = vec3(ca * n.x - sa * n.y, sa * n.x + ca * n.y, n.z);   // turn the normal back
+                    record(hit, ray, ts, nw, vec3(1.0, 0.0, 0.0), vec2(0.0), STAR);
+                }
+            }
+        }
+    }
+    // presents
+    testGift(ray, TREE + vec3(-0.7, 0.2, 0.3), vec3(0.2), PRESENT1, hit);
+    testGift(ray, TREE + vec3(0.05, 0.14, 1.1), vec3(0.14), PRESENT2, hit);       // small blue gift, in front
+    testGift(ray, TREE + vec3(0.6, 0.3, 0.4), vec3(0.3), PRESENT3, hit);          // big red gift, on the right
+    // Gift tag: a red triangle lying on the floor (ray-triangle test)
+    testTriangle(ray, TREE + vec3(1.3, 0.004, 1.1), TREE + vec3(1.7, 0.004, 1.1), TREE + vec3(1.5, 0.004, 1.5), TAG, hit);
+
+    // ---------- Snow globe (from outside) ----------
+    testCylinder(ray, vec3(GLOBE_C.x, 0.15, GLOBE_C.z), 0.55, 0.15, GLOBE_BASE, hit);   // wooden base
+    if (!shadow) testSphere(ray, GLOBE_C, GLOBE_R, GLASS, hit);
+
+    return hit;
+}
+
+// ===================== Materials =====================
+// textureLod: pick a smaller mipmap for far-away surfaces (distance-based)
+vec3 tex(sampler2D s, vec2 uv, float dist) {
+    return toLinear(textureLod(s, uv, max(0.0, log2(dist * 0.7))).rgb);
+}
+
+// Bump mapping: height image, compare with neighbors
+vec3 bumpMap(sampler2D s, vec2 uv, HitData h, float strength) {
+    float c  = textureLod(s, uv, 0.0).r;
+    float cu = textureLod(s, uv + vec2(0.01, 0.0), 0.0).r;
+    float cv = textureLod(s, uv + vec2(0.0, 0.01), 0.0).r;
+    vec3 n = vec3(-(cu - c) * strength, -(cv - c) * strength, 1.0);
+    return normalize(h.T * n.x + h.B * n.y + h.normal * n.z);
+}
+// Normal mapping: the image stores the normal
+vec3 normalMap(sampler2D s, vec2 uv, HitData h) {
+    vec3 n = textureLod(s, uv, 0.0).rgb * 2.0 - 1.0;
+    return normalize(h.T * n.x + h.B * n.y + h.normal * n.z);
+}
+
+Surface getSurface(HitData h, float dist) {
+    Surface s = Surface(vec3(0.5), h.normal, 0.0, 0.0, 1.0, 0.0, false);
+    vec2 brickUV = h.uv / vec2(0.9, 0.6);       // one brick image covers 0.9 x 0.6 (HW6)
+    vec2 woodUV = h.uv / 1.2;
+
+    if (h.mat == BRICK || h.mat == SOOT) {
+        s.color = tex(u_brick, brickUV, dist) * (h.mat == SOOT ? toLinear(vec3(0.45, 0.38, 0.36)) : vec3(1.0));
+        s.normal = bumpMap(u_brickHeight, brickUV, h, 4.0);
+        s.specular = 0.15; s.shininess = 16.0;
+    } else if (h.mat == FLOOR) {
+        s.color = tex(u_wood, woodUV, dist);
+        s.normal = normalMap(u_woodNormal, woodUV, h);
+        s.reflectivity = 0.2; s.specular = 0.4; s.shininess = 30.0;
+    } else if (h.mat == WALL) {
+        s.color = toLinear(vec3(0.32, 0.1, 0.1));
+    } else if (h.mat == MANTEL || h.mat == GLOBE_BASE) {
+        vec3 tint = h.mat == MANTEL ? vec3(0.8, 0.65, 0.55) : vec3(0.5, 0.4, 0.35);
+        s.color = tex(u_wood, h.mat == MANTEL ? woodUV : h.uv, dist) * toLinear(tint);
+        s.normal = normalMap(u_woodNormal, h.mat == MANTEL ? woodUV : h.uv, h);
+        s.reflectivity = 0.1; s.specular = 0.5; s.shininess = 40.0;
+    } else if (h.mat == LOG) {
+        s.color = tex(u_bark, h.uv, dist);
+        s.normal = normalMap(u_barkNormal, h.uv, h);
+        s.specular = 0.2; s.shininess = 10.0;
+    } else if (h.mat == PINE) {
+        s.color = tex(u_pine, h.uv, dist) * 1.4;
+        s.specular = 0.1; s.shininess = 8.0;
+    } else if (h.mat == ORN_RED || h.mat == ORN_BLUE) {
+        s.color = h.mat == ORN_RED ? tex(u_ornRed, h.uv, dist) : tex(u_ornBlue, h.uv, dist);
+        s.reflectivity = 0.2; s.specular = 1.0; s.shininess = 100.0;
+    } else if (h.mat == TREE_GREEN) {
+        s.color = toLinear(vec3(0.14, 0.36, 0.17));   // deeper, less neon green to sit with the warm fireplace light
+        s.specular = 0.15; s.shininess = 12.0;
+    } else if (h.mat == TRUNK) {
+        s.color = toLinear(vec3(0.55, 0.3, 0.1));
+    } else if (h.mat == STAR) {
+        s.color = toLinear(vec3(1.0, 0.85, 0.0));
+        s.specular = 0.8; s.shininess = 100.0; s.glow = 0.6;
+    } else if (h.mat == RED_BALL) {
+        s.color = toLinear(vec3(0.9, 0.05, 0.05));
+        s.reflectivity = 0.3; s.specular = 1.0; s.shininess = 100.0;
+    } else if (h.mat == PRESENT1) {                       // gift wraps (purple stars)
+        s.color = tex(u_giftPurple, h.uv, dist);
+        s.specular = 0.3; s.shininess = 30.0;
+    } else if (h.mat == PRESENT2) {                       // gift wraps (blue snowflakes)
+        s.color = tex(u_giftBlue, h.uv, dist);
+        s.specular = 0.3; s.shininess = 30.0;
+    } else if (h.mat == PRESENT3) {                       // gift wraps (red dots)
+        s.color = tex(u_giftRed, h.uv, dist);
+        s.specular = 0.3; s.shininess = 30.0;
+    } else if (h.mat == TAG) {
+        s.color = toLinear(vec3(0.8, 0.05, 0.05));
+        s.specular = 0.2; s.shininess = 20.0;
+    } else if (h.mat == GLASS) {
+        s.color = vec3(0.97, 0.99, 1.0);
+        s.specular = 1.0; s.shininess = 200.0; s.glass = true;
+    } else if (h.mat == SNOW || h.mat == SNOWMAN) {
+        s.color = vec3(0.92, 0.95, 1.0);
+        s.specular = 0.3; s.shininess = 20.0;
+    } else if (h.mat == COAL) {
+        s.color = vec3(0.02);
+        s.specular = 0.5; s.shininess = 50.0;
+    } else if (h.mat == CARROT) {
+        s.color = toLinear(vec3(1.0, 0.45, 0.05));
+    } else if (h.mat == FLAKE) {
+        s.color = vec3(1.0); s.glow = 0.6;
+    }
+    return s;
+}
+
+// ===================== Refraction (starter TODOs) =====================
+// eta = n1 / n2. Returns vec3(0) for total internal reflection.
+vec3 refraction(vec3 I, vec3 N, float eta) {
+    float cosi = -dot(N, I);
+    float k = 1.0 - eta * eta * (1.0 - cosi * cosi);
+    if (k < 0.0) return vec3(0.0);
+    return eta * I + (eta * cosi - sqrt(k)) * N;
+}
+
+// Schlick approximation: how much light is reflected instead of refracted
+float schlick(float cosine, float ref_idx) {
+    float r0 = (1.0 - ref_idx) / (1.0 + ref_idx);
+    r0 = r0 * r0;
+    return r0 + (1.0 - r0) * pow(1.0 - cosine, 5.0);
+}
+
+// Full Fresnel equations (lecture): the fraction of light reflected at a boundary,
+// the average of the parallel (Fpar) and perpendicular (Fperp) polarizations.
+// etaI, etaT = refractive indices on the incoming and transmitted sides. Returns 1 under total internal reflection.
+float fresnel(float cosi, float etaI, float etaT) {
+    float sint = etaI / etaT * sqrt(max(0.0, 1.0 - cosi * cosi));   // Snell: sin(theta_t)
+    if (sint >= 1.0) return 1.0;
+    float cost = sqrt(max(0.0, 1.0 - sint * sint));
+    float rPar  = (etaT * cosi - etaI * cost) / (etaT * cosi + etaI * cost);
+    float rPerp = (etaI * cosi - etaT * cost) / (etaI * cosi + etaT * cost);
+    return 0.5 * (rPar * rPar + rPerp * rPerp);
+}
+
+// ===================== Lighting =====================
+// Local Phong from one light, with a ray-traced shadow (HW6 attenuation)
+vec3 phong(vec3 p, vec3 geoN, Surface s, vec3 V, vec3 lightPos, vec3 lightColor) {
+    vec3 toLight = lightPos - p;
+    float d = length(toLight);
+    vec3 L = toLight / d;
+    if (dot(geoN, L) <= 0.0) return vec3(0.0);                    // light is behind the surface
+
+    HitData blocker = traceScene(Ray(p + geoN * EPS, L), true);   // shadow ray
+    if (blocker.hit && blocker.t < d) return vec3(0.0);
+
+    float fatt = 1.0 / (1.0 + 0.09 * d + 0.032 * d * d);
+    float diff = max(dot(s.normal, L), 0.0);
+    float spec = pow(max(dot(reflect(-L, s.normal), V), 0.0), s.shininess);
+    return fatt * lightColor * (s.color * diff + s.specular * spec);
+}
+
+// Fire video (HW6): a see-through glowing panel in the fireplace. Adds its color and lets the ray continue.
+vec3 fireGlow(Ray ray, float maxT) {
+    if (abs(ray.direction.z) < 1e-6) return vec3(0.0);
+    float t = (-0.44 - ray.origin.z) / ray.direction.z;
+    if (t < 0.001 || t > maxT) return vec3(0.0);
+    vec3 p = ray.origin + ray.direction * t;
+    vec2 uv = vec2((p.x + 0.65) / 1.3, (p.y - 0.07) / 1.1);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return vec3(0.0);
+    return toLinear(textureLod(u_fire, uv, 0.0).rgb) * 1.5;
+}
+
+vec3 trace(Ray ray) {
+    vec3 color = vec3(0.0);
+    vec3 attenuation = vec3(1.0);
+    float dist = 0.0;
+    vec3 fireColor = vec3(1.0, 0.5, 0.15) * u_fireIntensity;
+    vec3 roomColor = vec3(1.0, 0.95, 0.85) * u_roomIntensity;
+    vec3 starColor = vec3(1.0, 0.8, 0.45) * u_starIntensity;
+
+    // use loop to simulate the recursive process as GLSL doesn't support recursions
+    for (int bounce = 0; bounce < u_maxBounces; bounce++) {
+        HitData hit = traceScene(ray, false);
+        color += attenuation * fireGlow(ray, hit.hit ? hit.t : 1e10);
+
+        if (!hit.hit) {                                   // the open side of the room behind the camera
+            color += attenuation * vec3(0.03, 0.02, 0.015);
+            break;
+        }
+
+        dist += hit.t;
+        Surface s = getSurface(hit, dist);
+        vec3 V = -ray.direction;
+
+        if (s.glass) {
+            vec3 N = hit.normal;
+            float n1 = 1.0, n2 = GLASS_IOR;               // air -> glass
+            float cosi = dot(V, N);
+            if (cosi < 0.0) { N = -N; n1 = GLASS_IOR; n2 = 1.0; cosi = -cosi; }   // glass -> air
+            float eta = n1 / n2;
+
+            // Highlights on the outside of the glass
+            if (eta < 1.0) {
+                color += attenuation * s.specular * (
+                    fireColor * pow(max(dot(reflect(-normalize(FIRE_LIGHT - hit.point), N), V), 0.0), s.shininess) +
+                    roomColor * pow(max(dot(reflect(-normalize(ROOM_LIGHT - hit.point), N), V), 0.0), s.shininess) +
+                    starColor * pow(max(dot(reflect(-normalize(STAR_LIGHT - hit.point), N), V), 0.0), s.shininess));
+            }
+
+            // Option 1 from class ("choose"): follow the reflected OR the refracted ray,
+            // whichever Schlick says is stronger
+            vec3 refracted = refraction(ray.direction, N, eta);
+            bool totalInternalReflection = dot(refracted, refracted) == 0.0;
+            float F = fresnel(cosi, n1, n2);             // reflected fraction (full Fresnel)
+            vec3 direction = (totalInternalReflection || F > 0.5) ? reflect(ray.direction, N) : normalize(refracted);
+
+            ray = Ray(hit.point + direction * EPS, direction);
+            attenuation *= s.color;
+            continue;
+        }
+
+        // Local Phong from the three lights (+ ambient fill, + glow)
+        vec3 local = s.color * (u_ambientStrength + s.glow)
+                   + phong(hit.point, hit.normal, s, V, FIRE_LIGHT, fireColor)
+                   + phong(hit.point, hit.normal, s, V, ROOM_LIGHT, roomColor)
+                   + phong(hit.point, hit.normal, s, V, STAR_LIGHT, starColor);
+        color += attenuation * local * (1.0 - s.reflectivity);
+
+        // Reflection: continue with the mirror ray
+        if (s.reflectivity == 0.0) break;
+        attenuation *= s.reflectivity;
+        ray = Ray(hit.point + hit.normal * EPS, reflect(ray.direction, s.normal));
+    }
+    return color;
+}
+
+void main() {
+    // Orbit camera around the scene center
+    float cp = cos(u_cameraOrbit.x), sp = sin(u_cameraOrbit.x);
+    float cy = cos(u_cameraOrbit.y), sy = sin(u_cameraOrbit.y);
+    mat3 rotX = mat3(1.0, 0.0, 0.0,  0.0, cp, -sp,  0.0, sp, cp);
+    mat3 rotY = mat3(cy, 0.0, -sy,  0.0, 1.0, 0.0,  sy, 0.0, cy);
+    mat3 camera = rotY * rotX;
+
+    vec3 target = vec3(0.0, 1.6, 0.3);
+    vec2 uv = (gl_FragCoord.xy - 0.5 * u_resolution) / u_resolution.y;
+    Ray ray = Ray(target + camera * vec3(0.0, 0.0, u_cameraDist), camera * normalize(vec3(uv, -1.5)));
+
+    fragColor = vec4(pow(trace(ray), vec3(1.0 / 2.2)), 1.0);  // gamma correction
+}
+</script>
+
+<script>
+  const canvas = document.getElementById("glcanvas");
+  const gl = canvas.getContext("webgl2");
+
+  function compile(type, source) {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader));
+    return shader;
+  }
+
+  function createProgram(vsSource, fsSource) {
+    const prog = gl.createProgram();
+    gl.attachShader(prog, compile(gl.VERTEX_SHADER, vsSource));
+    gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fsSource));
+    gl.bindAttribLocation(prog, 0, "position");
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+    return prog;
+  }
+
+  // ---------------- Textures (template's loadTexture) ----------------
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);   // images start at the top row, texture coordinates at the bottom
+
+  function loadTexture(url) {
+    const texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([128, 128, 255, 255]));
+    const image = new Image();
+    image.onload = () => {
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+      gl.generateMipmap(gl.TEXTURE_2D);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    };
+    image.onerror = () => console.error("Could not load texture: " + url);
+    image.src = url;
+    return texture;
+  }
+
+  // name in the shader -> image file 
+  const TEXTURES = [
+    ["u_brick", "textures/brick.jpg"], ["u_brickHeight", "textures/brick_height.png"],
+    ["u_wood", "textures/wood.jpg"], ["u_woodNormal", "textures/wood_normal.png"],
+    ["u_bark", "textures/bark.jpg"], ["u_barkNormal", "textures/bark_normal.png"],
+    ["u_pine", "textures/pine.jpg"], ["u_ornRed", "textures/ornament_red.png"], ["u_ornBlue", "textures/ornament_blue.png"],
+    ["u_giftBlue", "textures/gift_blue.png"], ["u_giftPurple", "textures/gift_purple.png"], ["u_giftRed", "textures/gift_red.png"]
+  ];
+  const FIRE_UNIT = 12;
+  const textures = TEXTURES.map(([, url]) => loadTexture(url));
+
+  // ---------------- Fire video ----------------
+  const fireVideo = document.createElement("video");
+  fireVideo.src = fireVideo.canPlayType("video/webm") ? "textures/fire.webm" : "textures/fire.mp4";
+  fireVideo.loop = true;
+  fireVideo.muted = true;
+  fireVideo.playsInline = true;
+  fireVideo.play().catch(() => {});
+  document.addEventListener("click", () => fireVideo.play(), { once: true });
+
+  const fireTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, fireTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 255]));
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+  function bindTextures() {
+    textures.forEach((tex, i) => { gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, tex); });
+    gl.activeTexture(gl.TEXTURE0 + FIRE_UNIT);
+    gl.bindTexture(gl.TEXTURE_2D, fireTex);
+    if (fireVideo.readyState >= fireVideo.HAVE_CURRENT_DATA)     // copy the current video frame
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, fireVideo);
+  }
+
+  // ---------------- Shader editors ----------------
+  const vertEditor = document.getElementById("vertEditor");
+  const fragEditor = document.getElementById("fragEditor");
+  const shaderError = document.getElementById("shaderError");
+  vertEditor.value = document.getElementById("vertex-shader").textContent;
+  fragEditor.value = document.getElementById("fragment-shader").textContent;
+
+  let program;
+  function updateProgram() {
+    try {
+      const prog = createProgram(vertEditor.value, fragEditor.value);
+      gl.deleteProgram(program);
+      program = prog;
+      gl.useProgram(program);
+      TEXTURES.forEach(([name], i) => gl.uniform1i(gl.getUniformLocation(program, name), i));
+      gl.uniform1i(gl.getUniformLocation(program, "u_fire"), FIRE_UNIT);
+      shaderError.textContent = "";
+    } catch (e) {
+      shaderError.textContent = e.message.replace(/\0/g, "");
+    }
+  }
+  updateProgram();
+  vertEditor.addEventListener("input", updateProgram);
+  fragEditor.addEventListener("input", updateProgram);
+
+  gl.bindVertexArray(gl.createVertexArray());
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(0);
+
+  // ---------------- Controls ----------------
+  const SLIDERS = ["bounces", "ambient", "fire", "room", "star", "snow"];
+  for (const id of SLIDERS) {
+    const slider = document.getElementById(id);
+    slider.addEventListener("input", () => document.getElementById(id + "Value").textContent = slider.value);
+  }
+  const value = id => Number(document.getElementById(id).value);
+
+  // Drag to orbit the camera, scroll to zoom
+  let pitch = 0.12, yaw = 0, dist = 7.8;
+  canvas.addEventListener("pointerdown", e => canvas.setPointerCapture(e.pointerId));
+  canvas.addEventListener("pointermove", e => {
+    if (!canvas.hasPointerCapture(e.pointerId)) return;
+    yaw -= e.movementX * 0.01;
+    pitch = Math.min(1.2, Math.max(-0.05, pitch + e.movementY * 0.01));
+  });
+  canvas.addEventListener("wheel", e => {
+    dist = Math.min(14, Math.max(2.5, dist + e.deltaY * 0.005));
+    e.preventDefault();
+  }, { passive: false });
+
+  // ---------------- Render loop ----------------
+  let snowTime = 0, lastTime = 0;
+  function render(time) {
+    requestAnimationFrame(render);
+    if (!program) return;
+    const t = time / 1000;
+    snowTime += (t - lastTime) * value("snow");   // the slider sets how fast the snow falls
+    lastTime = t;
+
+    bindTextures();
+    const uniform = name => gl.getUniformLocation(program, name);
+    gl.uniform1f(uniform("u_time"), t);
+    gl.uniform1f(uniform("u_snowTime"), snowTime);
+    gl.uniform2f(uniform("u_resolution"), canvas.width, canvas.height);
+    gl.uniform1i(uniform("u_maxBounces"), value("bounces"));
+    gl.uniform1f(uniform("u_ambientStrength"), value("ambient"));
+    gl.uniform1f(uniform("u_fireIntensity"), value("fire"));
+    gl.uniform1f(uniform("u_roomIntensity"), value("room"));
+    gl.uniform1f(uniform("u_starIntensity"), value("star"));
+    gl.uniform2f(uniform("u_cameraOrbit"), pitch, yaw);
+    gl.uniform1f(uniform("u_cameraDist"), dist);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+  requestAnimationFrame(render);
+</script>
+</body>
+
+</html>
