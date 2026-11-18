@@ -31,3 +31,6 @@ Lighting is per-fragment Phong with two point lights: a movable room light and a
 **Live demo:** https://dottydot7.github.io/comp-graphics/HW6/
 
 **Controls:** drag to rotate, scroll or `w`/`s` to zoom, arrow keys to move the camera. Use the sliders to change bump and normal-map strength and the lights.
+
+# HW7 – Ray Tracing
+Each pixel shoots a ray into the scene. The ray is tested against spheres, planes, triangles, boxes, cylinders, and cones to find what it hits. When it hits a shiny surface it bounces, and when it hits the glass it bends (refracts) or reflects.
